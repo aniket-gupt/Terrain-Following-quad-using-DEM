@@ -13,7 +13,7 @@ from pyproj import Transformer
 DEM_FILE = "output_be.tif"
 MISSION_PLAN = "old5.plan"
 TARGET_AGL = 40.0  # Fly 40 meters above ground
-CRUISE_SPEED = 20.0
+CRUISE_SPEED = 12.0
 CHECK_INTERVAL = 3.0  # Check every 3 seconds
 MIN_UPDATE_GAP = 10.0  # Wait 10s between mission updates
 

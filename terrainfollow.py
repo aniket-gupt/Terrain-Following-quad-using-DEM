@@ -14,7 +14,6 @@ DEM_FILE = "output_be.tif"
 MISSION_PLAN = "old5.plan"
 TARGET_AGL = 40.0  # Fly 40 meters above ground
 CRUISE_SPEED = 20.0
-CLIMB_RATE = 1.0  # 1m/s climb rate
 CHECK_INTERVAL = 3.0  # Check every 3 seconds
 MIN_UPDATE_GAP = 10.0  # Wait 10s between mission updates
 
@@ -56,7 +55,7 @@ def load_mission_points(plan_file):
     return points
 
 def create_waypoint(lat, lon, rel_alt):
-    """Create a mission waypoint with controlled climb rate"""
+    """Create a mission waypoint"""
     return MissionItem(
         latitude_deg=lat,
         longitude_deg=lon,
@@ -75,32 +74,19 @@ def create_waypoint(lat, lon, rel_alt):
     )
 
 async def create_mission_with_terrain_alts(terrain_map, mission_points, home_alt):
-    """Create mission with terrain-based altitudes and smooth transitions"""
+    """Create mission with terrain-based altitudes"""
     print("Creating mission with terrain altitudes...")
     
     mission_waypoints = []
-    previous_alt = None
     
     for i, (lat, lon) in enumerate(mission_points):
         ground_height = terrain_map.get_ground_height(lat, lon)
         required_amsl = ground_height + TARGET_AGL
         rel_alt = max(required_amsl - home_alt, 15.0)
         
-        # Ensure smooth altitude transitions between waypoints
-        if previous_alt is not None:
-            alt_change = abs(rel_alt - previous_alt)
-            distance_to_previous = 100.0  # Approximate distance between waypoints
-            required_time = alt_change / CLIMB_RATE
-            required_speed = distance_to_previous / required_time if required_time > 0 else CRUISE_SPEED
-            
-            # Adjust speed to maintain 1m/s climb rate if needed
-            actual_speed = min(max(required_speed, 5.0), CRUISE_SPEED)  # Keep between 5-20 m/s
-        
         mission_waypoints.append(
             create_waypoint(lat, lon, rel_alt)
         )
-        
-        previous_alt = rel_alt
         
         if i < 5:  # Show first few waypoints
             print(f"  WP{i}: Ground {ground_height:.1f}m -> Alt {rel_alt:.1f}m")
@@ -108,33 +94,19 @@ async def create_mission_with_terrain_alts(terrain_map, mission_points, home_alt
     return MissionPlan(mission_waypoints)
 
 async def update_mission_altitudes(drone, terrain_map, mission_points, home_alt, current_wp):
-    """Update mission waypoint altitudes with controlled climb rate"""
+    """Update mission waypoint altitudes only"""
     try:
         # Create new mission with updated altitudes
         mission_waypoints = []
-        previous_alt = None
         
         for i, (lat, lon) in enumerate(mission_points):
             ground_height = terrain_map.get_ground_height(lat, lon)
             required_amsl = ground_height + TARGET_AGL
             rel_alt = max(required_amsl - home_alt, 15.0)
             
-            # Ensure smooth transitions
-            if previous_alt is not None and i >= current_wp:
-                alt_change = rel_alt - previous_alt
-                if abs(alt_change) > 20:  # If large altitude change
-                    # Add intermediate waypoint for smooth transition
-                    intermediate_alt = previous_alt + (alt_change * 0.5)
-                    mission_waypoints.append(
-                        create_waypoint(lat, lon, intermediate_alt)
-                    )
-                    print(f"    Added intermediate point for smooth climb")
-            
             mission_waypoints.append(
                 create_waypoint(lat, lon, rel_alt)
             )
-            
-            previous_alt = rel_alt
 
         new_mission = MissionPlan(mission_waypoints)
         
@@ -200,37 +172,15 @@ async def check_current_altitude(drone, terrain_map, home_alt):
     except:
         return None
 
-async def monitor_climb_rate(drone):
-    """Monitor actual climb rate to ensure it stays around 1m/s"""
-    try:
-        async for position in drone.telemetry.position():
-            # Get vertical velocity (m/s, positive = up, negative = down)
-            async for odometry in drone.telemetry.odometry():
-                vertical_velocity = odometry.velocity_body.y_m_s  # This might need adjustment
-                break
-            
-            climb_rate = abs(vertical_velocity)
-            if climb_rate > 2.0:  # If climbing too fast
-                print(f"⚠️  High climb rate: {climb_rate:.1f}m/s")
-            elif climb_rate < 0.5:  # If climbing too slow
-                print(f"⚠️  Low climb rate: {climb_rate:.1f}m/s")
-            else:
-                print(f"✅ Good climb rate: {climb_rate:.1f}m/s")
-                
-            break
-    except:
-        pass
-
 async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
-    """Simple terrain following with controlled climb rate"""
+    """Simple terrain following - only update waypoint altitudes"""
     print("Simple terrain follower active")
-    print(f"Following mission, 1m/s climb rate, updating on 5m error")
+    print("Following mission, updating waypoint altitudes only")
 
     current_waypoint = 0
     mission_complete = False
     last_update_time = 0
     last_check_time = 0
-    last_climb_check = 0
 
     while not mission_complete and current_waypoint < len(mission_points):
         try:
@@ -238,11 +188,6 @@ async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
             
             # Get current mission progress
             current_waypoint = await get_current_mission_progress(drone)
-            
-            # Check climb rate periodically
-            if current_time - last_climb_check > 5.0:  # Check every 5 seconds
-                last_climb_check = current_time
-                await monitor_climb_rate(drone)
             
             # Check altitude periodically
             if current_time - last_check_time > CHECK_INTERVAL:
@@ -252,9 +197,7 @@ async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
                 
                 if alt_info:
                     status = "OK" if abs(alt_info['alt_error']) <= 5 else "ADJUST"
-                    climb_indicator = "🔼" if alt_info['alt_error'] > 0 else "🔽" if alt_info['alt_error'] < 0 else "➡️"
-                    
-                    print(f"{climb_indicator} AGL: {alt_info['current_agl']:5.1f}m | "
+                    print(f"AGL: {alt_info['current_agl']:5.1f}m | "
                           f"Error: {alt_info['alt_error']:+5.1f}m | "
                           f"Status: {status} | "
                           f"WP: {current_waypoint + 1}/{len(mission_points)}")
@@ -264,14 +207,13 @@ async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
                         current_time - last_update_time > MIN_UPDATE_GAP and
                         current_waypoint < len(mission_points) - 1):
                         
-                        print(f"🔄 Updating mission altitudes (error: {alt_info['alt_error']:.1f}m)")
-                        print(f"📈 Using 1m/s climb rate for smooth transition")
+                        print(f"Updating mission altitudes (error: {alt_info['alt_error']:.1f}m)")
                         success = await update_mission_altitudes(
                             drone, terrain_map, mission_points, home_alt, current_waypoint
                         )
                         if success:
                             last_update_time = current_time
-                            print("✅ Waypoint altitudes updated with 1m/s climb rate")
+                            print("Waypoint altitudes updated")
 
             # Check mission completion
             if current_waypoint >= len(mission_points) - 1:
@@ -287,7 +229,7 @@ async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
                 
                 if distance_to_end < 50:
                     mission_complete = True
-                    print("🎉 Mission complete!")
+                    print("Mission complete!")
 
             await asyncio.sleep(1)
 
@@ -296,8 +238,8 @@ async def simple_terrain_follower(drone, terrain_map, mission_points, home_alt):
             await asyncio.sleep(2)
 
 async def main():
-    print("UAV Terrain Following System")
-    print("1m/s climb rate, updating altitudes on 5m error")
+    print("UAV Simple Terrain Following System")
+    print("Follow mission waypoints, update altitudes on 5m error")
 
     # Load terrain data
     terrain_map = TerrainMap(DEM_FILE)
@@ -346,9 +288,9 @@ async def main():
     
     # Begin mission
     await drone.mission.start_mission()
-    print("Mission started with 1m/s climb rate!")
+    print("Mission started!")
 
-    # Start terrain following
+    # Start simple terrain following
     await simple_terrain_follower(drone, terrain_map, mission_points, home_altitude)
 
     print("Mission completed!")
